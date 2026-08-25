@@ -1,27 +1,24 @@
 """
-Flask app that:
-- Accepts an uploaded .xlsx file (drag & drop)
-- Runs your Excel extraction/join/clean logic
+Streamlit app that:
+- Accepts an uploaded .xlsx file
+- Runs the Excel extraction/join/clean logic
 - Produces output files (XLSX/CSV/Auth debug optional)
-- Lets users download each file separately
+- Lets users download each file directly in the UI
 
 Run:
-  pip install flask pandas openpyxl
-  python app.py
-Open:
-  http://localhost:5000
+  pip install -r requirements.txt
+  streamlit run app_v2.py
 """
 
 import os
 import re
-import uuid
 import tempfile
 from datetime import datetime, date
+from io import BytesIO
 
 import pandas as pd
-from flask import Flask, request, render_template_string, send_file
-from werkzeug.utils import secure_filename
 from openpyxl import load_workbook
+import streamlit as st
 
 
 # ============================================================
@@ -536,652 +533,144 @@ def process_workbook(excel_path: str, initial_sheet: str, auth_sheet: str, auth_
 
 
 # ============================================================
-# 6) Flask UI + endpoints
+# 6) Streamlit UI
 # ============================================================
 
 ALLOWED_EXTENSIONS = {"xlsx"}
-
-JOBS_ROOT = os.path.join(tempfile.gettempdir(), "excel_processor_jobs")
-os.makedirs(JOBS_ROOT, exist_ok=True)
-
-app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50MB
 
 
 def allowed_file(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
-def job_dir(job_id: str) -> str:
-    return os.path.join(JOBS_ROOT, job_id)
+def dataframe_to_xlsx_bytes(df: pd.DataFrame) -> bytes:
+    buffer = BytesIO()
+    df.to_excel(buffer, index=False, engine="openpyxl")
+    return buffer.getvalue()
 
 
-def safe_job_path(job_id: str, filename: str) -> str:
-    return os.path.join(job_dir(job_id), os.path.basename(filename))
+def render_streamlit_app() -> None:
+    st.set_page_config(
+        page_title="Welcome Dashboard Processor",
+        page_icon=":bar_chart:",
+        layout="wide",
+    )
 
+    st.title("Welcome Dashboard Processor")
+    st.write(
+        "Upload your source workbook, choose the source sheet names, and generate "
+        "a cleaned output with the auth metric matched by specialist and date."
+    )
 
-UPLOAD_HTML = """
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Excel Processor</title>
-  <style>
-    :root{
-      --bg1:#0b1020;
-      --bg2:#0a1633;
-      --card: rgba(255,255,255,.08);
-      --card2: rgba(255,255,255,.10);
-      --stroke: rgba(255,255,255,.14);
-      --text:#eef2ff;
-      --muted: rgba(238,242,255,.72);
-      --muted2: rgba(238,242,255,.55);
-      --accent:#7c3aed;
-      --accent2:#22c55e;
-      --danger:#ef4444;
-      --shadow: 0 18px 60px rgba(0,0,0,.35);
-      --radius: 18px;
-    }
-    *{ box-sizing:border-box; }
-    body{
-      margin:0;
-      min-height:100vh;
-      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Apple Color Emoji","Segoe UI Emoji";
-      color:var(--text);
-      background:
-        radial-gradient(1100px 800px at 10% 10%, rgba(124,58,237,.35), transparent 55%),
-        radial-gradient(900px 700px at 90% 20%, rgba(34,197,94,.22), transparent 55%),
-        linear-gradient(160deg, var(--bg1), var(--bg2));
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      padding: 34px 16px;
-    }
-    .wrap{
-      width: min(980px, 100%);
-      display:grid;
-      gap: 18px;
-    }
-    header{
-      display:flex;
-      align-items:flex-start;
-      justify-content:space-between;
-      gap: 18px;
-      padding: 4px 2px;
-    }
-    .title{
-      line-height: 1.15;
-    }
-    .title h1{
-      margin:0;
-      font-size: clamp(22px, 4vw, 34px);
-      letter-spacing: -.02em;
-    }
-    .title p{
-      margin:10px 0 0 0;
-      color: var(--muted);
-      max-width: 62ch;
-      font-size: 14.5px;
-    }
-    .badge{
-      padding: 10px 12px;
-      border: 1px solid var(--stroke);
-      border-radius: 999px;
-      background: rgba(255,255,255,.06);
-      color: var(--muted);
-      font-size: 12.5px;
-      white-space: nowrap;
-    }
-    .grid{
-      display:grid;
-      grid-template-columns: 1.2fr .8fr;
-      gap: 18px;
-    }
-    @media (max-width: 860px){
-      .grid{ grid-template-columns: 1fr; }
-      .badge{ display:none; }
-    }
-    .card{
-      background: var(--card);
-      border: 1px solid var(--stroke);
-      border-radius: var(--radius);
-      box-shadow: var(--shadow);
-      overflow:hidden;
-    }
-    .card .inner{
-      padding: 18px;
-    }
-    .section-title{
-      margin:0 0 12px 0;
-      font-size: 13px;
-      letter-spacing: .12em;
-      text-transform: uppercase;
-      color: var(--muted2);
-    }
-    .drop{
-      border: 1px dashed rgba(238,242,255,.35);
-      border-radius: 16px;
-      background: rgba(255,255,255,.05);
-      padding: 18px;
-      transition: .18s ease;
-      display:flex;
-      align-items:center;
-      gap: 14px;
-    }
-    .drop.dragover{
-      border-color: rgba(124,58,237,.9);
-      background: rgba(124,58,237,.12);
-      transform: translateY(-1px);
-    }
-    .icon{
-      width: 42px;
-      height: 42px;
-      border-radius: 12px;
-      background: rgba(124,58,237,.18);
-      border: 1px solid rgba(124,58,237,.35);
-      display:grid;
-      place-items:center;
-      flex: 0 0 auto;
-    }
-    .icon svg{ width: 22px; height: 22px; opacity:.95; }
-    .drop strong{ display:block; margin-bottom: 4px; }
-    .drop span{ color: var(--muted); font-size: 13.5px; }
-    .file-meta{
-      margin-top: 10px;
-      color: var(--muted);
-      font-size: 13px;
-      display:flex;
-      gap: 10px;
-      align-items:center;
-      flex-wrap: wrap;
-    }
-    .pill{
-      padding: 6px 10px;
-      border-radius: 999px;
-      background: rgba(255,255,255,.06);
-      border: 1px solid var(--stroke);
-      font-size: 12.5px;
-      color: var(--muted);
-    }
-    label{
-      display:block;
-      font-size: 13px;
-      color: var(--muted);
-      margin: 14px 0 8px;
-    }
-    input[type=text], select{
-      width: 100%;
-      padding: 11px 12px;
-      border-radius: 14px;
-      border: 1px solid rgba(238,242,255,.18);
-      background: rgba(6,10,22,.35);
-      color: var(--text);
-      outline: none;
-      transition: .15s ease;
-    }
-    input[type=text]:focus, select:focus{
-      border-color: rgba(124,58,237,.75);
-      box-shadow: 0 0 0 4px rgba(124,58,237,.18);
-    }
-    .hint{
-      margin-top: 10px;
-      color: var(--muted2);
-      font-size: 13px;
-      line-height: 1.45;
-    }
-    .actions{
-      margin-top: 16px;
-      display:flex;
-      gap: 10px;
-      align-items:center;
-      flex-wrap: wrap;
-    }
-    button{
-      appearance:none;
-      border: 0;
-      border-radius: 14px;
-      padding: 12px 14px;
-      font-weight: 650;
-      color: white;
-      background: linear-gradient(135deg, rgba(124,58,237,1), rgba(91,33,182,1));
-      cursor:pointer;
-      transition: transform .12s ease, filter .12s ease, opacity .12s ease;
-      display:inline-flex;
-      align-items:center;
-      gap: 10px;
-    }
-    button:hover{ transform: translateY(-1px); filter: brightness(1.05); }
-    button:disabled{ opacity:.55; cursor:not-allowed; transform:none; }
-    .ghost{
-      background: rgba(255,255,255,.06);
-      border: 1px solid var(--stroke);
-      color: var(--text);
-    }
-    .ghost:hover{ filter:none; background: rgba(255,255,255,.09); }
-    .error{
-      margin-top: 14px;
-      padding: 12px 12px;
-      border-radius: 14px;
-      background: rgba(239,68,68,.12);
-      border: 1px solid rgba(239,68,68,.35);
-      color: rgba(255,255,255,.92);
-      font-size: 13.5px;
-      white-space: pre-wrap;
-    }
-    .steps{
-      display:grid;
-      gap: 12px;
-    }
-    .step{
-      padding: 14px;
-      border-radius: 16px;
-      background: rgba(255,255,255,.06);
-      border: 1px solid var(--stroke);
-    }
-    .step b{ display:block; margin-bottom: 6px; }
-    .step p{ margin:0; color: var(--muted); font-size: 13.5px; line-height: 1.45; }
-    footer{
-      color: rgba(238,242,255,.50);
-      font-size: 12.5px;
-      padding: 0 2px;
-    }
-    input[type=file]{ display:none; }
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <header>
-      <div class="title">
-        <h1>Excel Processor</h1>
-        <p>Upload your weekly workbook and generate clean, structured outputs. Drag & drop supported, and downloads are available separately.</p>
-      </div>
-      <div class="badge">Local tool • XLSX in → XLSX/CSV out</div>
-    </header>
+    upload_col, settings_col = st.columns([1.3, 1.0], gap="large")
 
-    <div class="grid">
-      <div class="card">
-        <div class="inner">
-          <div class="section-title">Upload & Settings</div>
+    with upload_col:
+        st.subheader("Upload Workbook")
+        uploaded_file = st.file_uploader(
+            "Choose a single Excel workbook",
+            type=["xlsx"],
+            help="The app reads the initial forms block, extracts the auth metric, and builds a merged output.",
+        )
 
-          <form id="form" method="post" action="/process" enctype="multipart/form-data">
-            <input id="file" type="file" name="file" accept=".xlsx" required>
+    with settings_col:
+        st.subheader("Settings")
+        initial_sheet = st.text_input("Initial Forms sheet name", value="January Weekly + MTD")
+        auth_sheet = st.text_input("Auth sheet name", value="Auth Report Weekly + MTD")
+        auth_metric = st.text_input("Auth metric label to extract", value="Received")
+        include_auth_debug = st.checkbox(
+            "Generate auth debug workbook",
+            value=True,
+            help="Useful when validating that the Auth extraction found the correct rows and dates.",
+        )
+        st.caption("Input: .xlsx | Output: .xlsx, .csv, optional auth debug .xlsx")
 
-            <div id="drop" class="drop" role="button" tabindex="0" aria-label="Upload XLSX">
-              <div class="icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" fill="none">
-                  <path d="M12 16V8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-                  <path d="M8.5 11.5 12 8l3.5 3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                  <path d="M20 16.5c1.5-.9 2.5-2.5 2.5-4.3A5 5 0 0 0 17 7.3a6.5 6.5 0 0 0-12.5 1.7A4.5 4.5 0 0 0 5 18h4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-                </svg>
-              </div>
-              <div>
-                <strong>Drop your .xlsx here</strong>
-                <span>or click to browse • Max 50MB</span>
-                <div id="meta" class="file-meta" style="display:none;">
-                  <span class="pill" id="metaName"></span>
-                  <span class="pill" id="metaSize"></span>
-                </div>
-              </div>
-            </div>
+    st.info(
+        "Matching is performed on cleaned `Welcome Specialist` values and normalized `Date` "
+        "values. Text entries like OFF/LEAVE are moved into `availability`."
+    )
 
-            <label for="initial_sheet">Initial sheet name</label>
-            <input type="text" id="initial_sheet" name="initial_sheet" value="January Weekly + MTD" required>
+    process_clicked = st.button("Process workbook", type="primary", use_container_width=True)
 
-            <label for="auth_sheet">Auth sheet name</label>
-            <input type="text" id="auth_sheet" name="auth_sheet" value="Auth Report Weekly + MTD" required>
+    if not process_clicked:
+        return
 
-            <label for="auth_metric">Auth metric label (header contains)</label>
-            <input type="text" id="auth_metric" name="auth_metric" value="Received" required>
+    if uploaded_file is None:
+        st.error("Please upload an .xlsx file.")
+        return
 
-            <label for="include_auth_debug">Create auth debug extract file?</label>
-            <select id="include_auth_debug" name="include_auth_debug">
-              <option value="yes" selected>Yes</option>
-              <option value="no">No</option>
-            </select>
+    if not allowed_file(uploaded_file.name):
+        st.error("Please upload an .xlsx file.")
+        return
 
-            <div class="actions">
-              <button id="btn" type="submit">
-                <span id="btnText">Process</span>
-                <span id="spinner" style="display:none;">⏳</span>
-              </button>
-              <button class="ghost" id="reset" type="button">Reset</button>
-            </div>
-
-            <div class="hint">
-              Tip: If the processor can’t find blocks, double-check the sheet names and that your headers include a row with <b>Date</b> and multiple date columns.
-            </div>
-
-            {% if error %}
-              <div class="error"><b>Couldn’t process file:</b><br>{{ error }}</div>
-            {% endif %}
-          </form>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="inner">
-          <div class="section-title">What you’ll get</div>
-          <div class="steps">
-            <div class="step">
-              <b>1) Final structured output (XLSX)</b>
-              <p>Long-format dataset with Sent/Signed + availability and Auth metric merged by Welcome Specialist + Date.</p>
-            </div>
-            <div class="step">
-              <b>2) Final structured output (CSV)</b>
-              <p>Same as XLSX, exported as CSV for easy ingestion into BI or pipelines.</p>
-            </div>
-            <div class="step">
-              <b>3) Auth extracted debug (XLSX)</b>
-              <p>Optional extraction output used for inspection and validation of the Auth block parsing.</p>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <footer>Built with Flask • Files are stored temporarily per upload job.</footer>
-  </div>
-
-  <script>
-    const drop = document.getElementById('drop');
-    const file = document.getElementById('file');
-    const meta = document.getElementById('meta');
-    const metaName = document.getElementById('metaName');
-    const metaSize = document.getElementById('metaSize');
-    const btn = document.getElementById('btn');
-    const btnText = document.getElementById('btnText');
-    const spinner = document.getElementById('spinner');
-    const form = document.getElementById('form');
-    const reset = document.getElementById('reset');
-
-    function humanBytes(bytes){
-      const units = ['B','KB','MB','GB'];
-      let i=0; let n=bytes;
-      while(n>=1024 && i<units.length-1){ n/=1024; i++; }
-      return `${n.toFixed(i===0?0:1)} ${units[i]}`;
-    }
-
-    function showMeta(f){
-      meta.style.display = 'flex';
-      metaName.textContent = f.name;
-      metaSize.textContent = humanBytes(f.size);
-    }
-
-    drop.addEventListener('click', () => file.click());
-    drop.addEventListener('keydown', (e) => {
-      if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); file.click(); }
-    });
-
-    file.addEventListener('change', () => {
-      if(file.files && file.files[0]) showMeta(file.files[0]);
-    });
-
-    ['dragenter','dragover'].forEach(evt => {
-      drop.addEventListener(evt, e => {
-        e.preventDefault();
-        e.stopPropagation();
-        drop.classList.add('dragover');
-      });
-    });
-    ['dragleave','drop'].forEach(evt => {
-      drop.addEventListener(evt, e => {
-        e.preventDefault();
-        e.stopPropagation();
-        drop.classList.remove('dragover');
-      });
-    });
-
-    drop.addEventListener('drop', (e) => {
-      if(e.dataTransfer.files && e.dataTransfer.files[0]){
-        file.files = e.dataTransfer.files;
-        showMeta(e.dataTransfer.files[0]);
-      }
-    });
-
-    form.addEventListener('submit', () => {
-      btn.disabled = true;
-      btnText.textContent = 'Processing…';
-      spinner.style.display = 'inline';
-    });
-
-    reset.addEventListener('click', () => {
-      form.reset();
-      meta.style.display = 'none';
-      btn.disabled = false;
-      btnText.textContent = 'Process';
-      spinner.style.display = 'none';
-    });
-  </script>
-</body>
-</html>
-"""
-
-RESULTS_HTML = """
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Results • Excel Processor</title>
-  <style>
-    :root{
-      --bg1:#0b1020; --bg2:#0a1633;
-      --card: rgba(255,255,255,.08);
-      --stroke: rgba(255,255,255,.14);
-      --text:#eef2ff;
-      --muted: rgba(238,242,255,.72);
-      --shadow: 0 18px 60px rgba(0,0,0,.35);
-      --radius: 18px;
-      --accent:#7c3aed;
-      --green:#22c55e;
-    }
-    *{ box-sizing:border-box; }
-    body{
-      margin:0;
-      min-height:100vh;
-      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
-      color:var(--text);
-      background:
-        radial-gradient(1100px 800px at 10% 10%, rgba(124,58,237,.35), transparent 55%),
-        radial-gradient(900px 700px at 90% 20%, rgba(34,197,94,.22), transparent 55%),
-        linear-gradient(160deg, var(--bg1), var(--bg2));
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      padding: 34px 16px;
-    }
-    .wrap{ width:min(980px, 100%); display:grid; gap: 16px; }
-    .card{
-      background: var(--card);
-      border: 1px solid var(--stroke);
-      border-radius: var(--radius);
-      box-shadow: var(--shadow);
-      overflow:hidden;
-    }
-    .inner{ padding: 18px; }
-    h1{ margin: 0 0 8px 0; font-size: clamp(22px, 4vw, 34px); letter-spacing:-.02em; }
-    p{ margin: 0; color: var(--muted); }
-    .grid{
-      display:grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 14px;
-      margin-top: 14px;
-    }
-    @media(max-width:900px){ .grid{ grid-template-columns: 1fr; } }
-    .dl{
-      padding: 16px;
-      border-radius: 16px;
-      border: 1px solid var(--stroke);
-      background: rgba(255,255,255,.06);
-      display:flex;
-      flex-direction:column;
-      gap: 10px;
-    }
-    .tag{
-      display:inline-flex;
-      align-items:center;
-      gap: 8px;
-      font-size: 12.5px;
-      color: rgba(238,242,255,.75);
-    }
-    .tag .dot{
-      width: 10px; height:10px; border-radius: 999px;
-      background: rgba(34,197,94,.9);
-      box-shadow: 0 0 0 3px rgba(34,197,94,.18);
-    }
-    a.btn{
-      display:inline-flex;
-      justify-content:center;
-      align-items:center;
-      gap: 10px;
-      padding: 12px 14px;
-      border-radius: 14px;
-      text-decoration:none;
-      color: white;
-      background: linear-gradient(135deg, rgba(124,58,237,1), rgba(91,33,182,1));
-      font-weight: 650;
-      border: 0;
-      transition: transform .12s ease, filter .12s ease;
-    }
-    a.btn:hover{ transform: translateY(-1px); filter: brightness(1.05); }
-    a.ghost{
-      background: rgba(255,255,255,.06);
-      border: 1px solid var(--stroke);
-      color: var(--text);
-      font-weight: 600;
-    }
-    .row{ display:flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
-    code{
-      background: rgba(255,255,255,.06);
-      border: 1px solid var(--stroke);
-      padding: .2rem .45rem;
-      border-radius: 10px;
-      color: rgba(238,242,255,.9);
-    }
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="card">
-      <div class="inner">
-        <h1>Done ✅</h1>
-        <p>Your files are ready. Download them individually below.</p>
-        <p style="margin-top:10px;color:rgba(238,242,255,.55);">Job ID: <code>{{ job_id }}</code></p>
-
-        <div class="grid">
-          <div class="dl">
-            <div class="tag"><span class="dot"></span> Final output • XLSX</div>
-            <div style="color:rgba(238,242,255,.72);font-size:13.5px;line-height:1.45;">
-              Structured dataset with availability + auth metric merged by name/date.
-            </div>
-            <a class="btn" href="/download/{{ job_id }}/final_xlsx">Download XLSX</a>
-          </div>
-
-          <div class="dl">
-            <div class="tag"><span class="dot"></span> Final output • CSV</div>
-            <div style="color:rgba(238,242,255,.72);font-size:13.5px;line-height:1.45;">
-              Same data as XLSX, exported as CSV.
-            </div>
-            <a class="btn" href="/download/{{ job_id }}/final_csv">Download CSV</a>
-          </div>
-
-          <div class="dl" style="opacity: {{ '1' if has_auth_debug else '.55' }};">
-            <div class="tag"><span class="dot"></span> Auth debug • XLSX</div>
-            <div style="color:rgba(238,242,255,.72);font-size:13.5px;line-height:1.45;">
-              Extraction output for validating the Auth parsing.
-            </div>
-            {% if has_auth_debug %}
-              <a class="btn" href="/download/{{ job_id }}/auth_debug_xlsx">Download Auth Debug</a>
-            {% else %}
-              <a class="btn ghost" href="/" aria-disabled="true">Not generated</a>
-            {% endif %}
-          </div>
-        </div>
-
-        <div class="row">
-          <a class="btn ghost" href="/">Process another file</a>
-        </div>
-      </div>
-    </div>
-  </div>
-</body>
-</html>
-"""
-
-
-@app.get("/")
-def index():
-    return render_template_string(UPLOAD_HTML, error=None)
-
-
-@app.post("/process")
-def process():
-    if "file" not in request.files:
-        return render_template_string(UPLOAD_HTML, error="No file part in the request.")
-
-    f = request.files["file"]
-    if f.filename is None or f.filename.strip() == "":
-        return render_template_string(UPLOAD_HTML, error="No file selected.")
-
-    filename = secure_filename(f.filename)
-    if not allowed_file(filename):
-        return render_template_string(UPLOAD_HTML, error="Please upload an .xlsx file.")
-
-    initial_sheet = request.form.get("initial_sheet", "January Weekly + MTD")
-    auth_sheet = request.form.get("auth_sheet", "Auth Report Weekly + MTD")
-    auth_metric = request.form.get("auth_metric", "Received")
-    include_auth_debug = request.form.get("include_auth_debug", "yes") == "yes"
-
-    job_id = uuid.uuid4().hex
-    os.makedirs(job_dir(job_id), exist_ok=True)
-
-    in_path = safe_job_path(job_id, filename)
-    f.save(in_path)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+        tmp.write(uploaded_file.getbuffer())
+        input_path = tmp.name
 
     try:
-        df_final, df_auth = process_workbook(
-            in_path,
-            initial_sheet=initial_sheet,
-            auth_sheet=auth_sheet,
-            auth_metric_name=auth_metric
-        )
+        with st.spinner("Processing workbook..."):
+            df_final, df_auth = process_workbook(
+                input_path,
+                initial_sheet=initial_sheet,
+                auth_sheet=auth_sheet,
+                auth_metric_name=auth_metric,
+            )
     except Exception as e:
-        return render_template_string(UPLOAD_HTML, error=str(e))
+        st.error(str(e))
+        return
+    finally:
+        if os.path.exists(input_path):
+            os.unlink(input_path)
 
-    out_xlsx = safe_job_path(job_id, "structured_output_with_auth4.xlsx")
-    out_csv = safe_job_path(job_id, "structured_output_with_auth4.csv")
-    auth_xlsx = safe_job_path(job_id, "auth_extracted_debug.xlsx")
+    final_xlsx_bytes = dataframe_to_xlsx_bytes(df_final)
+    final_csv_bytes = df_final.to_csv(index=False).encode("utf-8")
+    auth_xlsx_bytes = dataframe_to_xlsx_bytes(df_auth) if include_auth_debug else None
 
-    df_final.to_excel(out_xlsx, index=False)
-    df_final.to_csv(out_csv, index=False)
+    st.success("Your files are ready. Download them below.")
+
+    metric_col1, metric_col2, metric_col3 = st.columns(3)
+    metric_col1.metric("Merged rows", len(df_final))
+    metric_col2.metric("Auth rows", len(df_auth))
+    metric_col3.metric("Auth metric", auth_metric)
+
+    st.subheader("Downloads")
+    download_col1, download_col2, download_col3 = st.columns(3)
+
+    with download_col1:
+        st.download_button(
+            "Download XLSX",
+            data=final_xlsx_bytes,
+            file_name="structured_output_with_auth4.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+
+    with download_col2:
+        st.download_button(
+            "Download CSV",
+            data=final_csv_bytes,
+            file_name="structured_output_with_auth4.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+    with download_col3:
+        if auth_xlsx_bytes is not None:
+            st.download_button(
+                "Download Auth Debug",
+                data=auth_xlsx_bytes,
+                file_name="auth_extracted_debug.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+        else:
+            st.caption("Auth debug workbook not generated.")
+
+    with st.expander("Preview merged output"):
+        st.dataframe(df_final, use_container_width=True)
+
     if include_auth_debug:
-        df_auth.to_excel(auth_xlsx, index=False)
-
-    return render_template_string(RESULTS_HTML, job_id=job_id, has_auth_debug=include_auth_debug)
-
-
-@app.get("/download/<job_id>/<which>")
-def download(job_id: str, which: str):
-    mapping = {
-        "final_xlsx": ("structured_output_with_auth4.xlsx",
-                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
-        "final_csv": ("structured_output_with_auth4.csv", "text/csv"),
-        "auth_debug_xlsx": ("auth_extracted_debug.xlsx",
-                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
-    }
-
-    if which not in mapping:
-        return ("Unknown download type.", 404)
-
-    fname, mimetype = mapping[which]
-    path = safe_job_path(job_id, fname)
-
-    if not os.path.exists(path):
-        return ("File not found (maybe you chose not to generate it).", 404)
-
-    return send_file(path, as_attachment=True, download_name=fname, mimetype=mimetype)
+        with st.expander("Preview auth debug output"):
+            st.dataframe(df_auth, use_container_width=True)
 
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+render_streamlit_app()
